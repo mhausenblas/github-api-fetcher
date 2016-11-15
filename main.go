@@ -8,24 +8,31 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 )
 
 const (
 	VERSION    string = "0.1.0"
-	GITHUB_API string = "https://api.github.com/"
 	INFLUX_API string = "http://influxdb.marathon.l4lb.thisdcos.directory:8086"
 )
 
 var (
-	mux         *http.ServeMux
-	serviceport string
+	mux          *http.ServeMux
+	serviceport  string
+	fetchwaitsec int
 )
 
 func init() {
 	serviceport = "9393"
 	if sp := os.Getenv("PORT0"); sp != "" {
 		serviceport = sp
+	}
+	fetchwaitsec = 10
+	if fw := os.Getenv("FETCH_WAIT_SEC"); fw != "" {
+		if fwi, err := strconv.Atoi(fw); err == nil {
+			fetchwaitsec = fwi
+		}
 	}
 }
 
@@ -70,10 +77,16 @@ func ingest2Influx() {
 	}); err != nil {
 		log.WithFields(log.Fields{"func": "ingest2Influx"}).Error(err)
 	} else {
-		for {
-			writePoints(c)
-			time.Sleep(5 * time.Second)
-		}
+		writePoints(c)
+	}
+}
+
+func ingest() {
+	for {
+		// fetchorgs()
+		ingest2Influx()
+		// ingest2Kafka()
+		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -81,8 +94,8 @@ func main() {
 	mux = http.NewServeMux()
 	fmt.Printf("This is the GitHub API Fetcher in version %s listening on port %s\n", VERSION, serviceport)
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
-		log.WithFields(log.Fields{"handle": "/start"}).Info("Starting ingest process from ", GITHUB_API)
-		go ingest2Influx()
+		log.WithFields(log.Fields{"handle": "/start"}).Info("Starting to fetch data from GitHub")
+		go ingest()
 	})
 	log.Fatal(http.ListenAndServe(":"+serviceport, mux))
 }
