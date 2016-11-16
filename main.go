@@ -80,27 +80,27 @@ func write(c client.Client, events []github.Event) {
 	}); err != nil {
 		log.WithFields(log.Fields{"func": "writePoints"}).Error(err)
 	} else {
-		log.WithFields(log.Fields{"func": "writePoints"}).Info("Connected to ", c)
+		log.WithFields(log.Fields{"func": "writePoints"}).Info("Connected to ", fmt.Sprintf("%+v", c))
 		for _, event := range events {
 			tags := map[string]string{
-				"repo":    *event.Repo.Name,
-				"actor":   *event.Actor.Login,
-				"company": *event.Actor.Company,
+				"repo":   *event.Repo.Name,
+				"action": *event.Type,
+				"actor":  *event.Actor.Login,
 			}
 			fields := map[string]interface{}{
-				"action": event.Type,
-				"count":  1,
+				"count": 1,
 			}
 			if pt, err := client.NewPoint("event", tags, fields, time.Now()); err != nil {
 				log.WithFields(log.Fields{"func": "writePoints"}).Error(err)
 			} else {
 				bp.AddPoint(pt)
+				log.WithFields(log.Fields{"func": "writePoints"}).Info("Added point ", fmt.Sprintf("%+v", pt))
 			}
 		}
 		if err := c.Write(bp); err != nil {
 			log.WithFields(log.Fields{"func": "writePoints"}).Error(err)
 		} else {
-			log.WithFields(log.Fields{"func": "writePoints"}).Info("Written ", bp)
+			log.WithFields(log.Fields{"func": "writePoints"}).Info("Added and written all points in this batch")
 		}
 	}
 }

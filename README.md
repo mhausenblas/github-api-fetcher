@@ -2,12 +2,15 @@
 
 Fetches data from the public GitHub API and ingests it into various sinks (for now InfluxDB only).
 
-To run locally:
+## To run locally
 
     $ go install github.com/mhausenblas/github-api-fetcher
     $ ./github-api-fetcher
+    $ curl localhost:9393/start
 
-To run as a DC/OS service (1.8 or above required):
+## To run as a DC/OS service 
+
+This requires a DC/OS 1.8 or above cluster:
 
 ```json
 {
@@ -21,11 +24,16 @@ To run as a DC/OS service (1.8 or above required):
         "VIP_0": "/fetcher:80"
       }
     }
-  ]
+  ],
+  "env": {
+    "GITHUB_TARGET_ORG": "dcos",
+    "FETCH_WAIT_SEC": "60",
+    "INFLUX_TARGET_DB": "githuborgs"
+  }
 }
 ```
 
-Above assumes that the InfluxDB package is installed with the following options:
+Note that all env variable shown here are the default and above assumes that the InfluxDB package is installed (`dcos package install --options=influx-config.json influxdb`) with the following options:
 
 ```json
 {
@@ -36,3 +44,7 @@ Above assumes that the InfluxDB package is installed with the following options:
   }
 }
 ```
+
+Now you can kick off fetch & ingest like so (from within the cluster):
+
+    $ curl fetcher.marathon.l4lb.thisdcos.directory:80/start
