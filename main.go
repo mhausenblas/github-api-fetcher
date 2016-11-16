@@ -1,11 +1,32 @@
+// Copyright 2016 Mesosphere. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// The GitGub API Fetcher (GAF) is a simple app server that fetches event
+// data on a certain GitHub organization defaulting to 'dcos' and that you
+// can overwrite with an environment variable GITHUB_TARGET_ORG. GAF then
+// ingests the events into InfluxDB. By default GAF serves on port 9393
+// and this can be overwritten using the env variable PORT0. The fetch and
+// ingest process may be started at any time using the host:port/start endpoint
+// and the time to wait between two fetches can be defined vua env variable
+// FETCH_WAIT_SEC, which defaults to 10 seconds.
 package main
 
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
-	// "github.com/google/go-github/github"
+	"github.com/google/go-github/github"
 	"github.com/influxdata/influxdb/client/v2"
-	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -18,9 +39,15 @@ const (
 )
 
 var (
-	mux          *http.ServeMux
-	serviceport  string
-	fetchwaitsec int
+	mux         *http.ServeMux
+	ghc         *github.Client
+	serviceport string
+	// which GitHub org to fetch events from (defaults to 'dcos'):
+	targetorg string
+	// how many seconds to wait between fetching events:
+	fetchwaitsec time.Duration
+	// into which InfluxDB database to ingest events:
+	targetdb string
 )
 
 func init() {
@@ -28,33 +55,44 @@ func init() {
 	if sp := os.Getenv("PORT0"); sp != "" {
 		serviceport = sp
 	}
+	targetorg = "dcos"
+	if to := os.Getenv("GITHUB_TARGET_ORG"); to != "" {
+		targetorg = to
+	}
 	fetchwaitsec = 10
 	if fw := os.Getenv("FETCH_WAIT_SEC"); fw != "" {
 		if fwi, err := strconv.Atoi(fw); err == nil {
-			fetchwaitsec = fwi
+			fetchwaitsec = time.Duration(fwi)
 		}
 	}
+	targetdb = "githuborgs"
+	if td := os.Getenv("INFLUX_TARGET_DB"); td != "" {
+		targetdb = td
+	}
+	ghc = github.NewClient(nil)
 }
 
-func writePoints(c client.Client) {
+// write batch-ingests the events from GitHub into InfluxDB
+func write(c client.Client, events []github.Event) {
 	if bp, err := client.NewBatchPoints(client.BatchPointsConfig{
-		Database:  "githuborgs",
-		Precision: "s",
+		Database:  targetdb,
+		Precision: "s", // second resultion is fine for our purpose
 	}); err != nil {
 		log.WithFields(log.Fields{"func": "writePoints"}).Error(err)
 	} else {
 		log.WithFields(log.Fields{"func": "writePoints"}).Info("Connected to ", c)
-		for i := 0; i < 10; i++ {
+		for _, event := range events {
 			tags := map[string]string{
-				"action": "SOMEACTION",
-				"actor":  "SOMEUSER",
+				"repo":    *event.Repo.Name,
+				"actor":   *event.Actor.Login,
+				"company": *event.Actor.Company,
 			}
 			fields := map[string]interface{}{
-				"repo":  "SOMEREPO",
-				"count": rand.Float64() * 100.0,
+				"action": event.Type,
+				"count":  1,
 			}
-
-			if pt, err := client.NewPoint("activity", tags, fields, time.Now()); err != nil {
+			if pt, err := client.NewPoint("event", tags, fields, time.Now()); err != nil {
+				log.WithFields(log.Fields{"func": "writePoints"}).Error(err)
 			} else {
 				bp.AddPoint(pt)
 			}
@@ -67,9 +105,10 @@ func writePoints(c client.Client) {
 	}
 }
 
-func ingest2Influx() {
-	log.WithFields(log.Fields{"func": "ingest2Influx"}).Info("Starting to ingest data into InfluxDB")
-
+// ingest2Influx creates a connection to InfluxDB and ingests the GitHub events
+// of the targeted org that occured in the last reporting period.
+func ingest2Influx(events []github.Event) {
+	log.WithFields(log.Fields{"func": "ingest2Influx"}).Info("Trying to ingest data into InfluxDB")
 	if c, err := client.NewHTTPClient(client.HTTPConfig{
 		Addr:     INFLUX_API,
 		Username: "root",
@@ -77,22 +116,37 @@ func ingest2Influx() {
 	}); err != nil {
 		log.WithFields(log.Fields{"func": "ingest2Influx"}).Error(err)
 	} else {
-		writePoints(c)
+		write(c, events)
 	}
 }
 
+// fetch gets the events for the targeted org via the public GitHub API
+func fetch() ([]github.Event, error) {
+	log.WithFields(log.Fields{"func": "fetch"}).Info("Trying to fetch events from org ", targetorg)
+	if events, _, err := ghc.Activity.ListEventsForOrganization(targetorg, nil); err != nil {
+		log.WithFields(log.Fields{"func": "fetch"}).Error(err)
+		return nil, err
+	} else {
+		log.WithFields(log.Fields{"func": "fetch"}).Info("Successfully fetched events")
+		return events, nil
+	}
+}
+
+// ingest tries to fetch event data of the targeted org from GitHub
+// and if successful ingests it into InfluxDB.
 func ingest() {
 	for {
-		// fetchorgs()
-		ingest2Influx()
-		// ingest2Kafka()
-		time.Sleep(5 * time.Second)
+		if events, err := fetch(); err == nil {
+			ingest2Influx(events)
+		}
+		time.Sleep(fetchwaitsec * time.Second)
 	}
 }
 
 func main() {
 	mux = http.NewServeMux()
 	fmt.Printf("This is the GitHub API Fetcher in version %s listening on port %s\n", VERSION, serviceport)
+	// the /start endpoint kicks off the fetch and ingest process in a separate Go routine:
 	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
 		log.WithFields(log.Fields{"handle": "/start"}).Info("Starting to fetch data from GitHub")
 		go ingest()
